@@ -1041,7 +1041,7 @@ static void ggml_offload_nop(struct ggml_tensor * tensor) {
 }
 
 static std::string llama_token_to_piece(const struct llama_context * ctx, llama_token token) {
-    std::vector<char> result(128, 0);
+    std::vector<char> result(8, 0);
     const int n_tokens = llama_token_to_piece(llama_get_model(ctx), token, result.data(), result.size(),false);
     if (n_tokens < 0) {
         result.resize(-n_tokens);
