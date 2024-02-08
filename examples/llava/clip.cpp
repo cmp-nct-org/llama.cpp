@@ -30,6 +30,7 @@
 #include <vector>
 #include <sstream>
 #include <cinttypes>
+#include <limits>
 
 static std::string format(const char * fmt, ...) {
     va_list ap;
