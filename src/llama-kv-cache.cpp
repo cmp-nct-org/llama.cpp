@@ -701,7 +701,7 @@ bool llama_kv_cache::update(llama_context * lctx, bool do_shift, const stream_co
     return updated;
 }
 
-llama_kv_cache::slot_info llama_kv_cache::find_slot(const llama_ubatch & ubatch, bool cont) const {
+llama_kv_cache::slot_info llama_kv_cache::find_slot(const llama_ubatch & ubatch, bool cont, bool no_swa_reuse) const {
 
     if (debug > 0) {
         for (uint32_t s = 0; s < ubatch.n_seqs_unq; ++s) {
@@ -843,11 +843,13 @@ llama_kv_cache::slot_info llama_kv_cache::find_slot(const llama_ubatch & ubatch,
                 //  - the cell is empty
                 //  - the cell is occupied only by one sequence:
                 //    - (disabled) mask causally, if the sequence is the same as the one we are inserting
-                //    - mask SWA, using current max pos for that sequence in the cache
+                //    - mask SWA, using current max pos for that sequence in the cache (unless no_swa_reuse is set)
                 //                always insert in the cell with minimum pos
                 bool can_use = cells.is_empty(idx);
 
-                if (!can_use && cells.seq_count(idx) == 1) {
+                // SWA cell reuse is disabled when no_swa_reuse is set (e.g., during state restoration).
+                // This prevents state_read from destroying other sequences' KV data in SWA cache.
+                if (!can_use && !no_swa_reuse && cells.seq_count(idx) == 1) {
                     const llama_pos pos_cell = cells.pos_get(idx);
 
                     // (disabled) causal mask
@@ -860,13 +862,20 @@ llama_kv_cache::slot_info llama_kv_cache::find_slot(const llama_ubatch & ubatch,
                         const llama_seq_id seq_id_cell = cells.seq_get(idx);
 
                         // SWA mask
-                        if (llama_hparams::is_masked_swa(n_swa, swa_type, pos_cell, cells.seq_pos_max(seq_id_cell) + 1)) {
+                        if (is_masked_swa(pos_cell, cells.seq_pos_max(seq_id_cell) + 1)) {
                             can_use = true;
                         }
                     }
                 }
 
                 if (can_use) {
+                    // DEBUG: Log when a non-empty cell is selected for reuse
+                    if (!cells.is_empty(idx)) {
+                        const llama_seq_id seq_id_cell = cells.seq_get(idx);
+                        const llama_pos pos_cell = cells.pos_get(idx);
+                        LLAMA_LOG_DEBUG("%s: REUSING non-empty cell %u (seq=%d, pos=%d, n_swa=%u) for seq %d\n",
+                                        __func__, idx, seq_id_cell, pos_cell, n_swa, seq_id);
+                    }
                     res.idxs[s].push_back(idx);
                 } else {
                     if (cont) {
@@ -1899,7 +1908,10 @@ bool llama_kv_cache::state_read_meta(llama_io_read_i & io, uint32_t strm, uint32
             ubatch.seq_id[i]   = &dest_seq_id;
         }
 
-        sinfo = find_slot(ubatch, false);
+        // no_swa_reuse=true: State restoration must NOT destroy other sequences' KV data via SWA cell reuse.
+        // Without this, restoring a blob to seq X could evict cells from seq Y that are "outside the SWA window"
+        // relative to X's positions, causing data loss in other sequences during parallel multi-slot operations.
+        sinfo = find_slot(ubatch, false, /*no_swa_reuse=*/true);
         if (sinfo.empty()) {
             LLAMA_LOG_ERROR("%s: failed to find available cells in kv cache\n", __func__);
             return false;
